@@ -1,10 +1,11 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { useParams } from 'react-router-dom';
-import Peer, { MediaConnection } from 'peerjs';
+import Peer, { DataConnection, MediaConnection } from 'peerjs';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
-import { Monitor, Users, StopCircle, Play } from 'lucide-react';
+import { Monitor, Users, StopCircle, Play, Copy, Check } from 'lucide-react';
+import { toast } from 'sonner';
 
 const Presenter = () => {
   const { roomId } = useParams<{ roomId: string }>();
@@ -12,11 +13,16 @@ const Presenter = () => {
   const [viewerCount, setViewerCount] = useState(0);
   const [status, setStatus] = useState<'connecting' | 'ready' | 'sharing' | 'error'>('connecting');
   const [error, setError] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
   
   const peerRef = useRef<Peer | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
-  const connectionsRef = useRef<Map<string, MediaConnection>>(new Map());
   const videoRef = useRef<HTMLVideoElement>(null);
+  
+  // Track connected viewers by their peer IDs (data connections)
+  const viewerDataConnections = useRef<Map<string, DataConnection>>(new Map());
+  // Track active media calls to viewers
+  const viewerMediaCalls = useRef<Map<string, MediaConnection>>(new Map());
 
   // Initialize PeerJS connection
   useEffect(() => {
@@ -24,7 +30,6 @@ const Presenter = () => {
 
     const presenterId = `presenter-${roomId}`;
     
-    // Using free PeerJS cloud server for PoC
     const peer = new Peer(presenterId, {
       debug: 2,
     });
@@ -48,84 +53,123 @@ const Presenter = () => {
     peerRef.current = peer;
 
     return () => {
-      // Cleanup on unmount
       stopSharing();
       peer.destroy();
     };
   }, [roomId]);
 
-  // Handle incoming viewer connections
+  // Handle incoming viewer data connections
   useEffect(() => {
     const peer = peerRef.current;
     if (!peer) return;
 
-    const handleConnection = (conn: any) => {
-      console.log('Viewer connected:', conn.peer);
+    const handleDataConnection = (conn: DataConnection) => {
+      console.log('Viewer data connection from:', conn.peer);
       
       conn.on('open', () => {
-        // If we're already sharing, send the stream to the new viewer
+        console.log('Viewer data connection open:', conn.peer);
+        
+        // Store the data connection
+        viewerDataConnections.current.set(conn.peer, conn);
+        setViewerCount(viewerDataConnections.current.size);
+        
+        // If we're already sharing, immediately call this viewer with the stream
         if (streamRef.current && isSharing) {
-          const call = peer.call(conn.peer, streamRef.current);
-          connectionsRef.current.set(conn.peer, call);
-          setViewerCount(connectionsRef.current.size);
+          console.log('Sharing already active, calling new viewer:', conn.peer);
+          callViewer(conn.peer, streamRef.current);
         }
       });
 
       conn.on('close', () => {
-        console.log('Viewer disconnected:', conn.peer);
-        connectionsRef.current.delete(conn.peer);
-        setViewerCount(connectionsRef.current.size);
+        console.log('Viewer data connection closed:', conn.peer);
+        viewerDataConnections.current.delete(conn.peer);
+        viewerMediaCalls.current.delete(conn.peer);
+        setViewerCount(viewerDataConnections.current.size);
+      });
+
+      conn.on('error', (err) => {
+        console.error('Viewer data connection error:', err);
+        viewerDataConnections.current.delete(conn.peer);
+        viewerMediaCalls.current.delete(conn.peer);
+        setViewerCount(viewerDataConnections.current.size);
       });
     };
 
-    peer.on('connection', handleConnection);
+    peer.on('connection', handleDataConnection);
 
     return () => {
-      peer.off('connection', handleConnection);
+      peer.off('connection', handleDataConnection);
     };
   }, [isSharing]);
+
+  // Call a viewer with the stream
+  const callViewer = useCallback((viewerId: string, stream: MediaStream) => {
+    const peer = peerRef.current;
+    if (!peer) return;
+
+    console.log('Calling viewer with stream:', viewerId);
+    const call = peer.call(viewerId, stream);
+    viewerMediaCalls.current.set(viewerId, call);
+
+    call.on('close', () => {
+      console.log('Media call closed:', viewerId);
+      viewerMediaCalls.current.delete(viewerId);
+    });
+
+    call.on('error', (err) => {
+      console.error('Media call error:', err);
+      viewerMediaCalls.current.delete(viewerId);
+    });
+  }, []);
 
   const startSharing = useCallback(async () => {
     try {
       // Request screen share
-      const stream = await navigator.mediaDevices.getDisplayMedia({
-        video: true,
+      const displayStream = await navigator.mediaDevices.getDisplayMedia({
+        video: {
+          cursor: 'always'
+        } as MediaTrackConstraints,
         audio: false,
       });
 
-      streamRef.current = stream;
+      // Extract the video track and create a new stream for consistency
+      const videoTrack = displayStream.getVideoTracks()[0];
+      if (!videoTrack) {
+        throw new Error('No video track available');
+      }
+
+      // Create a single stream to use for both preview and sending
+      const outboundStream = new MediaStream([videoTrack]);
+      streamRef.current = outboundStream;
+      
       setIsSharing(true);
       setStatus('sharing');
 
-      // Show preview
+      // Show preview using the same stream viewers will receive
       if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-        // Explicitly play to handle autoplay restrictions
+        videoRef.current.srcObject = outboundStream;
         videoRef.current.play().catch(err => {
           console.error('Error playing preview:', err);
         });
       }
 
       // Handle stream end (user clicks "Stop sharing" in browser UI)
-      stream.getVideoTracks()[0].onended = () => {
+      videoTrack.onended = () => {
         stopSharing();
       };
 
-      // Send stream to all connected viewers
-      const peer = peerRef.current;
-      if (peer) {
-        connectionsRef.current.forEach((_, viewerId) => {
-          const call = peer.call(viewerId, stream);
-          connectionsRef.current.set(viewerId, call);
-        });
-      }
+      // Call all currently connected viewers
+      console.log('Calling all connected viewers:', viewerDataConnections.current.size);
+      viewerDataConnections.current.forEach((_, viewerId) => {
+        callViewer(viewerId, outboundStream);
+      });
 
       console.log('Screen sharing started');
     } catch (err) {
       console.error('Error starting screen share:', err);
       setError('Failed to start screen sharing. Please allow screen access.');
     }
-  }, []);
+  }, [callViewer]);
 
   const stopSharing = useCallback(() => {
     // Stop all tracks
@@ -134,11 +178,11 @@ const Presenter = () => {
       streamRef.current = null;
     }
 
-    // Close all media connections
-    connectionsRef.current.forEach((call) => {
+    // Close all media calls
+    viewerMediaCalls.current.forEach((call) => {
       call.close();
     });
-    connectionsRef.current.clear();
+    viewerMediaCalls.current.clear();
 
     // Clear video preview
     if (videoRef.current) {
@@ -146,10 +190,19 @@ const Presenter = () => {
     }
 
     setIsSharing(false);
-    setStatus('ready');
-    setViewerCount(0);
+    if (status !== 'error') {
+      setStatus('ready');
+    }
     console.log('Screen sharing stopped');
-  }, []);
+  }, [status]);
+
+  const copyViewerLink = useCallback(() => {
+    const link = `${window.location.origin}/viewer/${roomId}`;
+    navigator.clipboard.writeText(link);
+    setCopied(true);
+    toast.success('Viewer link copied to clipboard');
+    setTimeout(() => setCopied(false), 2000);
+  }, [roomId]);
 
   return (
     <div className="min-h-screen bg-background p-6">
@@ -216,31 +269,35 @@ const Presenter = () => {
               )}
             </div>
 
-            <p className="text-sm text-muted-foreground">
-              Share this link with viewers:{' '}
+            <div className="flex items-center gap-2">
+              <p className="text-sm text-muted-foreground">
+                Share this link with viewers:
+              </p>
               <code className="bg-muted px-2 py-1 rounded text-xs">
                 {window.location.origin}/viewer/{roomId}
               </code>
-            </p>
+              <Button variant="ghost" size="sm" onClick={copyViewerLink}>
+                {copied ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
+              </Button>
+            </div>
           </CardContent>
         </Card>
 
         {/* Preview */}
         <Card>
           <CardHeader>
-            <CardTitle>Preview</CardTitle>
+            <CardTitle>Preview (Same as Viewer)</CardTitle>
           </CardHeader>
           <CardContent>
-            {isSharing ? (
-              <video
-                ref={videoRef}
-                autoPlay
-                muted
-                playsInline
-                controls={false}
-                className="w-full rounded-lg bg-black aspect-video"
-              />
-            ) : (
+            <video
+              ref={videoRef}
+              autoPlay
+              muted
+              playsInline
+              controls={false}
+              className={`w-full rounded-lg bg-black aspect-video ${!isSharing ? 'hidden' : ''}`}
+            />
+            {!isSharing && (
               <div className="w-full aspect-video bg-muted rounded-lg flex items-center justify-center">
                 <p className="text-muted-foreground">No screen being shared</p>
               </div>
