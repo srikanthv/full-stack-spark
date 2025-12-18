@@ -61,6 +61,10 @@ const Viewer = () => {
         
         if (videoRef.current) {
           videoRef.current.srcObject = remoteStream;
+          // Explicitly play to handle autoplay restrictions
+          videoRef.current.play().catch(err => {
+            console.error('Error playing video:', err);
+          });
         }
       });
 
