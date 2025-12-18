@@ -100,6 +100,10 @@ const Presenter = () => {
       // Show preview
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
+        // Explicitly play to handle autoplay restrictions
+        videoRef.current.play().catch(err => {
+          console.error('Error playing preview:', err);
+        });
       }
 
       // Handle stream end (user clicks "Stop sharing" in browser UI)
