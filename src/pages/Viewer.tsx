@@ -56,15 +56,22 @@ const Viewer = () => {
       call.answer();
 
       call.on('stream', (remoteStream) => {
-        console.log('Received remote stream');
+        console.log('Received remote stream, tracks:', remoteStream.getTracks().map(t => t.kind));
         setStatus('receiving');
         
         if (videoRef.current) {
+          // Clear any existing stream first
+          videoRef.current.srcObject = null;
           videoRef.current.srcObject = remoteStream;
-          // Explicitly play to handle autoplay restrictions
-          videoRef.current.play().catch(err => {
-            console.error('Error playing video:', err);
-          });
+          
+          // Use setTimeout to ensure DOM updates before play
+          setTimeout(() => {
+            if (videoRef.current) {
+              videoRef.current.play().catch(err => {
+                console.error('Error playing video:', err);
+              });
+            }
+          }, 100);
         }
       });
 
@@ -177,14 +184,15 @@ const Viewer = () => {
             </CardTitle>
           </CardHeader>
           <CardContent>
-            {status === 'receiving' ? (
-              <video
-                ref={videoRef}
-                autoPlay
-                playsInline
-                className="w-full rounded-lg bg-black aspect-video"
-              />
-            ) : (
+            {/* Always render video element so ref is available when stream arrives */}
+            <video
+              ref={videoRef}
+              autoPlay
+              muted
+              playsInline
+              className={`w-full rounded-lg bg-black aspect-video ${status !== 'receiving' ? 'hidden' : ''}`}
+            />
+            {status !== 'receiving' && (
               <div className="w-full aspect-video bg-muted rounded-lg flex flex-col items-center justify-center gap-3">
                 {(status === 'connecting' || status === 'waiting') && (
                   <Loader2 className="w-8 h-8 animate-spin text-muted-foreground" />
