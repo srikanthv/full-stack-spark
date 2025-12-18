@@ -237,6 +237,7 @@ const Presenter = () => {
                 autoPlay
                 muted
                 playsInline
+                controls={false}
                 className="w-full rounded-lg bg-black aspect-video"
               />
             ) : (
