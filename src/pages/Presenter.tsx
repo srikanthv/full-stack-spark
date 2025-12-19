@@ -4,7 +4,7 @@ import Peer, { DataConnection, MediaConnection } from 'peerjs';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
-import { Monitor, Users, StopCircle, Play, Copy, Check } from 'lucide-react';
+import { Monitor, Users, StopCircle, Play, Copy, Check, Mic, MicOff, Maximize } from 'lucide-react';
 import { toast } from 'sonner';
 
 const Presenter = () => {
@@ -14,10 +14,12 @@ const Presenter = () => {
   const [status, setStatus] = useState<'connecting' | 'ready' | 'sharing' | 'error'>('connecting');
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const [isMicOn, setIsMicOn] = useState(true); // Default mic ON
   
   const peerRef = useRef<Peer | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
+  const audioTrackRef = useRef<MediaStreamTrack | null>(null); // Store mic track for toggling
   
   // Track connected viewers by their peer IDs (data connections)
   const viewerDataConnections = useRef<Map<string, DataConnection>>(new Map());
@@ -124,7 +126,7 @@ const Presenter = () => {
 
   const startSharing = useCallback(async () => {
     try {
-      // Request screen share
+      // Request screen share (video only)
       const displayStream = await navigator.mediaDevices.getDisplayMedia({
         video: {
           cursor: 'always'
@@ -132,20 +134,35 @@ const Presenter = () => {
         audio: false,
       });
 
-      // Extract the video track and create a new stream for consistency
+      // Extract the video track
       const videoTrack = displayStream.getVideoTracks()[0];
       if (!videoTrack) {
         throw new Error('No video track available');
       }
 
-      // Create a single stream to use for both preview and sending
-      const outboundStream = new MediaStream([videoTrack]);
+      // Request microphone audio
+      let audioTrack: MediaStreamTrack | null = null;
+      try {
+        const audioStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        audioTrack = audioStream.getAudioTracks()[0];
+        audioTrackRef.current = audioTrack;
+        // Set initial mic state
+        audioTrack.enabled = isMicOn;
+        console.log('Microphone captured successfully');
+      } catch (audioErr) {
+        console.warn('Microphone access denied or unavailable:', audioErr);
+        toast.warning('Microphone not available - sharing screen only');
+      }
+
+      // Create combined stream with video + audio (if available)
+      const tracks = audioTrack ? [videoTrack, audioTrack] : [videoTrack];
+      const outboundStream = new MediaStream(tracks);
       streamRef.current = outboundStream;
       
       setIsSharing(true);
       setStatus('sharing');
 
-      // Show preview using the same stream viewers will receive
+      // Show preview using the same stream viewers will receive (muted to prevent echo)
       if (videoRef.current) {
         videoRef.current.srcObject = outboundStream;
         videoRef.current.play().catch(err => {
@@ -164,12 +181,12 @@ const Presenter = () => {
         callViewer(viewerId, outboundStream);
       });
 
-      console.log('Screen sharing started');
+      console.log('Screen sharing started with', audioTrack ? 'audio' : 'video only');
     } catch (err) {
       console.error('Error starting screen share:', err);
       setError('Failed to start screen sharing. Please allow screen access.');
     }
-  }, [callViewer]);
+  }, [callViewer, isMicOn]);
 
   const stopSharing = useCallback(() => {
     // Stop all tracks
@@ -177,6 +194,7 @@ const Presenter = () => {
       streamRef.current.getTracks().forEach(track => track.stop());
       streamRef.current = null;
     }
+    audioTrackRef.current = null;
 
     // Close all media calls
     viewerMediaCalls.current.forEach((call) => {
@@ -195,6 +213,30 @@ const Presenter = () => {
     }
     console.log('Screen sharing stopped');
   }, [status]);
+
+  // Toggle microphone on/off
+  const toggleMic = useCallback(() => {
+    if (audioTrackRef.current) {
+      const newState = !isMicOn;
+      audioTrackRef.current.enabled = newState;
+      setIsMicOn(newState);
+      toast.success(newState ? 'Microphone unmuted' : 'Microphone muted');
+    }
+  }, [isMicOn]);
+
+  // Toggle fullscreen for presenter preview
+  const toggleFullscreen = useCallback(() => {
+    if (!videoRef.current) return;
+    
+    if (document.fullscreenElement) {
+      document.exitFullscreen();
+    } else {
+      videoRef.current.requestFullscreen().catch(err => {
+        console.error('Error entering fullscreen:', err);
+        toast.error('Could not enter fullscreen mode');
+      });
+    }
+  }, []);
 
   const copyViewerLink = useCallback(() => {
     const link = `${window.location.origin}/viewer/${roomId}`;
@@ -247,7 +289,7 @@ const Presenter = () => {
             </CardTitle>
           </CardHeader>
           <CardContent className="space-y-4">
-            <div className="flex gap-3">
+            <div className="flex gap-3 flex-wrap">
               {!isSharing ? (
                 <Button 
                   onClick={startSharing} 
@@ -258,14 +300,24 @@ const Presenter = () => {
                   Start Screen Share
                 </Button>
               ) : (
-                <Button 
-                  onClick={stopSharing} 
-                  variant="destructive"
-                  className="flex items-center gap-2"
-                >
-                  <StopCircle className="w-4 h-4" />
-                  Stop Sharing
-                </Button>
+                <>
+                  <Button 
+                    onClick={stopSharing} 
+                    variant="destructive"
+                    className="flex items-center gap-2"
+                  >
+                    <StopCircle className="w-4 h-4" />
+                    Stop Sharing
+                  </Button>
+                  <Button
+                    onClick={toggleMic}
+                    variant={isMicOn ? 'secondary' : 'outline'}
+                    className="flex items-center gap-2"
+                  >
+                    {isMicOn ? <Mic className="w-4 h-4" /> : <MicOff className="w-4 h-4" />}
+                    {isMicOn ? 'Mic On' : 'Mic Off'}
+                  </Button>
+                </>
               )}
             </div>
 
@@ -285,8 +337,19 @@ const Presenter = () => {
 
         {/* Preview */}
         <Card>
-          <CardHeader>
+          <CardHeader className="flex flex-row items-center justify-between">
             <CardTitle>Preview (Same as Viewer)</CardTitle>
+            {isSharing && (
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={toggleFullscreen}
+                className="flex items-center gap-1"
+              >
+                <Maximize className="w-4 h-4" />
+                Fullscreen
+              </Button>
+            )}
           </CardHeader>
           <CardContent>
             <video
