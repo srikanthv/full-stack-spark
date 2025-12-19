@@ -16,7 +16,7 @@ export type ViewerStatus = 'connecting' | 'waiting' | 'receiving' | 'ended' | 'e
 const ScreenShareViewer = ({ roomId, peerConfig }: ScreenShareViewerProps) => {
   const [status, setStatus] = useState<ViewerStatus>('connecting');
   const [error, setError] = useState<string | null>(null);
-  const [isMuted, setIsMuted] = useState(false);
+  const [isMuted, setIsMuted] = useState(true);
 
   const peerRef = useRef<Peer | null>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -75,6 +75,7 @@ const ScreenShareViewer = ({ roomId, peerConfig }: ScreenShareViewerProps) => {
           // Use setTimeout to ensure DOM updates before play
           setTimeout(() => {
             if (videoRef.current) {
+              videoRef.current.muted = true;
               videoRef.current.play().catch(err => {
                 console.error('Error playing video:', err);
               });
