@@ -1,9 +1,11 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, useCallback } from 'react';
 import { useParams } from 'react-router-dom';
 import Peer from 'peerjs';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
-import { Monitor, Loader2 } from 'lucide-react';
+import { Button } from '@/components/ui/button';
+import { Monitor, Loader2, Maximize } from 'lucide-react';
+import { toast } from 'sonner';
 
 const Viewer = () => {
   const { roomId } = useParams<{ roomId: string }>();
@@ -119,6 +121,20 @@ const Viewer = () => {
     };
   }, [roomId]);
 
+  // Toggle fullscreen for viewer video
+  const toggleFullscreen = useCallback(() => {
+    if (!videoRef.current) return;
+    
+    if (document.fullscreenElement) {
+      document.exitFullscreen();
+    } else {
+      videoRef.current.requestFullscreen().catch(err => {
+        console.error('Error entering fullscreen:', err);
+        toast.error('Could not enter fullscreen mode');
+      });
+    }
+  }, []);
+
   const getStatusMessage = () => {
     switch (status) {
       case 'connecting':
@@ -177,18 +193,29 @@ const Viewer = () => {
 
         {/* Video display */}
         <Card>
-          <CardHeader>
+          <CardHeader className="flex flex-row items-center justify-between">
             <CardTitle className="flex items-center gap-2">
               <Monitor className="w-5 h-5" />
               Shared Screen
             </CardTitle>
+            {status === 'receiving' && (
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={toggleFullscreen}
+                className="flex items-center gap-1"
+              >
+                <Maximize className="w-4 h-4" />
+                Fullscreen
+              </Button>
+            )}
           </CardHeader>
           <CardContent>
             {/* Always render video element so ref is available when stream arrives */}
+            {/* NOT muted - viewers should hear presenter audio */}
             <video
               ref={videoRef}
               autoPlay
-              muted
               playsInline
               className={`w-full rounded-lg bg-black aspect-video ${status !== 'receiving' ? 'hidden' : ''}`}
             />
