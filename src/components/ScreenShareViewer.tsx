@@ -65,22 +65,43 @@ const ScreenShareViewer = ({ roomId, peerConfig }: ScreenShareViewerProps) => {
 
       call.on('stream', (remoteStream) => {
         console.log('Received remote stream, tracks:', remoteStream.getTracks().map(t => t.kind));
-        setStatus('receiving');
 
         if (videoRef.current) {
+          const video = videoRef.current;
+          
           // Clear any existing stream first
-          videoRef.current.srcObject = null;
-          videoRef.current.srcObject = remoteStream;
-
-          // Use setTimeout to ensure DOM updates before play
-          setTimeout(() => {
+          video.srcObject = null;
+          
+          // Ensure video is muted BEFORE attaching stream (browser autoplay policy)
+          video.muted = true;
+          
+          // Attach the stream
+          video.srcObject = remoteStream;
+          
+          // Update status to show video element
+          setStatus('receiving');
+          
+          // Force play with muted state to bypass autoplay restrictions
+          // Use requestAnimationFrame to ensure DOM has updated
+          requestAnimationFrame(() => {
             if (videoRef.current) {
-              videoRef.current.muted = true;
-              videoRef.current.play().catch(err => {
-                console.error('Error playing video:', err);
-              });
+              videoRef.current.muted = true; // Double-ensure muted state
+              videoRef.current.play()
+                .then(() => {
+                  console.log('Video playback started successfully');
+                })
+                .catch(err => {
+                  console.error('Error playing video:', err);
+                  // Fallback: try again after a short delay
+                  setTimeout(() => {
+                    if (videoRef.current) {
+                      videoRef.current.muted = true;
+                      videoRef.current.play().catch(e => console.error('Retry play failed:', e));
+                    }
+                  }, 200);
+                });
             }
-          }, 100);
+          });
         }
       });
 
@@ -238,14 +259,14 @@ const ScreenShareViewer = ({ roomId, peerConfig }: ScreenShareViewerProps) => {
               </div>
             )}
           </CardHeader>
-          <CardContent>
-            {/* Always render video element so ref is available when stream arrives */}
+          <CardContent className="relative">
+            {/* Video element always rendered but visibility controlled via positioning */}
             <video
               ref={videoRef}
               autoPlay
               playsInline
-              muted={isMuted}
-              className={`w-full rounded-lg bg-black aspect-video ${status !== 'receiving' ? 'hidden' : ''}`}
+              muted
+              className={`w-full rounded-lg bg-black aspect-video ${status !== 'receiving' ? 'absolute opacity-0 pointer-events-none' : ''}`}
             />
             {status !== 'receiving' && (
               <div className="w-full aspect-video bg-muted rounded-lg flex flex-col items-center justify-center gap-3">
