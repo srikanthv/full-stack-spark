@@ -3,7 +3,7 @@ import Peer, { DataConnection, MediaConnection } from 'peerjs';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
-import { Monitor, Users, StopCircle, Play, Copy, Check, Mic, MicOff, Maximize } from 'lucide-react';
+import { Monitor, Users, StopCircle, Play, Copy, Check, Mic, MicOff, Maximize, Radio, UserPlus, UserMinus } from 'lucide-react';
 import { toast } from 'sonner';
 
 export interface ScreenSharePresenterProps {
@@ -13,6 +13,13 @@ export interface ScreenSharePresenterProps {
 
 export type PresenterStatus = 'connecting' | 'ready' | 'sharing' | 'error';
 
+// Viewer activity event for join/leave notifications
+interface ViewerActivity {
+  type: 'join' | 'leave';
+  viewerId: string;
+  timestamp: number;
+}
+
 const ScreenSharePresenter = ({ roomId, peerConfig }: ScreenSharePresenterProps) => {
   const [isSharing, setIsSharing] = useState(false);
   const [viewerCount, setViewerCount] = useState(0);
@@ -20,16 +27,45 @@ const ScreenSharePresenter = ({ roomId, peerConfig }: ScreenSharePresenterProps)
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [isMicOn, setIsMicOn] = useState(true);
+  const [recentActivity, setRecentActivity] = useState<ViewerActivity[]>([]);
 
   const peerRef = useRef<Peer | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const audioTrackRef = useRef<MediaStreamTrack | null>(null);
+  
+  // Audio element for viewer audio playback
+  const viewerAudioRef = useRef<HTMLAudioElement>(null);
 
   // Track connected viewers by their peer IDs (data connections)
   const viewerDataConnections = useRef<Map<string, DataConnection>>(new Map());
   // Track active media calls to viewers
   const viewerMediaCalls = useRef<Map<string, MediaConnection>>(new Map());
+  // Track incoming viewer audio streams
+  const viewerAudioStreams = useRef<Map<string, MediaStream>>(new Map());
+
+  // Add viewer activity notification
+  const addViewerActivity = useCallback((type: 'join' | 'leave', viewerId: string) => {
+    const activity: ViewerActivity = {
+      type,
+      viewerId: viewerId.split('-').pop() || viewerId, // Short ID
+      timestamp: Date.now(),
+    };
+    
+    setRecentActivity(prev => [...prev.slice(-4), activity]); // Keep last 5
+
+    // Show toast notification
+    if (type === 'join') {
+      toast.success(`Viewer joined`, { icon: <UserPlus className="w-4 h-4" /> });
+    } else {
+      toast.info(`Viewer left`, { icon: <UserMinus className="w-4 h-4" /> });
+    }
+
+    // Clear activity after 5 seconds
+    setTimeout(() => {
+      setRecentActivity(prev => prev.filter(a => a.timestamp !== activity.timestamp));
+    }, 5000);
+  }, []);
 
   // Initialize PeerJS connection
   useEffect(() => {
@@ -80,6 +116,7 @@ const ScreenSharePresenter = ({ roomId, peerConfig }: ScreenSharePresenterProps)
         // Store the data connection
         viewerDataConnections.current.set(conn.peer, conn);
         setViewerCount(viewerDataConnections.current.size);
+        addViewerActivity('join', conn.peer);
 
         // If we're already sharing, immediately call this viewer with the stream
         if (streamRef.current && isSharing) {
@@ -92,13 +129,16 @@ const ScreenSharePresenter = ({ roomId, peerConfig }: ScreenSharePresenterProps)
         console.log('Viewer data connection closed:', conn.peer);
         viewerDataConnections.current.delete(conn.peer);
         viewerMediaCalls.current.delete(conn.peer);
+        viewerAudioStreams.current.delete(conn.peer);
         setViewerCount(viewerDataConnections.current.size);
+        addViewerActivity('leave', conn.peer);
       });
 
       conn.on('error', (err) => {
         console.error('Viewer data connection error:', err);
         viewerDataConnections.current.delete(conn.peer);
         viewerMediaCalls.current.delete(conn.peer);
+        viewerAudioStreams.current.delete(conn.peer);
         setViewerCount(viewerDataConnections.current.size);
       });
     };
@@ -108,7 +148,57 @@ const ScreenSharePresenter = ({ roomId, peerConfig }: ScreenSharePresenterProps)
     return () => {
       peer.off('connection', handleDataConnection);
     };
-  }, [isSharing]);
+  }, [isSharing, addViewerActivity]);
+
+  // Handle incoming calls from viewers (for two-way audio)
+  useEffect(() => {
+    const peer = peerRef.current;
+    if (!peer) return;
+
+    const handleCall = (call: MediaConnection) => {
+      console.log('Receiving call from viewer:', call.peer);
+      
+      // Answer viewer's call (we receive their audio)
+      call.answer();
+
+      call.on('stream', (remoteStream) => {
+        console.log('Received audio stream from viewer:', call.peer, 'tracks:', remoteStream.getTracks().map(t => t.kind));
+        
+        // Store viewer audio stream
+        viewerAudioStreams.current.set(call.peer, remoteStream);
+        
+        // Play viewer audio (start muted for autoplay policy, user can unmute)
+        if (viewerAudioRef.current) {
+          // Combine all viewer audio streams into one
+          const audioContext = new AudioContext();
+          const destination = audioContext.createMediaStreamDestination();
+          
+          viewerAudioStreams.current.forEach((stream) => {
+            const source = audioContext.createMediaStreamSource(stream);
+            source.connect(destination);
+          });
+          
+          viewerAudioRef.current.srcObject = destination.stream;
+          viewerAudioRef.current.play().catch(err => {
+            console.log('Viewer audio autoplay blocked, user interaction required:', err);
+          });
+        }
+        
+        toast.success('Viewer microphone connected');
+      });
+
+      call.on('close', () => {
+        console.log('Viewer audio call closed:', call.peer);
+        viewerAudioStreams.current.delete(call.peer);
+      });
+    };
+
+    peer.on('call', handleCall);
+
+    return () => {
+      peer.off('call', handleCall);
+    };
+  }, []);
 
   // Call a viewer with the stream
   const callViewer = useCallback((viewerId: string, stream: MediaStream) => {
@@ -254,6 +344,9 @@ const ScreenSharePresenter = ({ roomId, peerConfig }: ScreenSharePresenterProps)
 
   return (
     <div className="min-h-screen bg-background p-6">
+      {/* Hidden audio element for viewer audio playback */}
+      <audio ref={viewerAudioRef} autoPlay muted className="hidden" />
+      
       <div className="max-w-4xl mx-auto space-y-6">
         {/* Header */}
         <div className="flex items-center justify-between">
@@ -264,10 +357,17 @@ const ScreenSharePresenter = ({ roomId, peerConfig }: ScreenSharePresenterProps)
             </p>
           </div>
           <div className="flex items-center gap-3">
+            {/* Live status indicator with pulsing animation */}
+            {status === 'sharing' && (
+              <Badge variant="default" className="flex items-center gap-1.5 bg-red-500 hover:bg-red-500">
+                <Radio className="w-3 h-3 animate-pulse" />
+                LIVE
+              </Badge>
+            )}
             <Badge variant={status === 'sharing' ? 'default' : 'secondary'}>
               {status === 'connecting' && 'Connecting...'}
               {status === 'ready' && 'Ready'}
-              {status === 'sharing' && 'Live'}
+              {status === 'sharing' && 'Sharing'}
               {status === 'error' && 'Error'}
             </Badge>
             <Badge variant="outline" className="flex items-center gap-1">
@@ -276,6 +376,26 @@ const ScreenSharePresenter = ({ roomId, peerConfig }: ScreenSharePresenterProps)
             </Badge>
           </div>
         </div>
+
+        {/* Viewer activity notifications */}
+        {recentActivity.length > 0 && (
+          <div className="flex flex-wrap gap-2">
+            {recentActivity.map((activity) => (
+              <Badge 
+                key={activity.timestamp}
+                variant={activity.type === 'join' ? 'default' : 'secondary'}
+                className="animate-in fade-in slide-in-from-top-2 duration-300"
+              >
+                {activity.type === 'join' ? (
+                  <UserPlus className="w-3 h-3 mr-1" />
+                ) : (
+                  <UserMinus className="w-3 h-3 mr-1" />
+                )}
+                Viewer {activity.viewerId.slice(0, 4)} {activity.type === 'join' ? 'joined' : 'left'}
+              </Badge>
+            ))}
+          </div>
+        )}
 
         {/* Error display */}
         {error && (
