@@ -1,9 +1,9 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
-import Peer, { MediaConnection } from 'peerjs';
+import Peer, { DataConnection, MediaConnection } from 'peerjs';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
-import { Monitor, Loader2, Maximize, Volume2, VolumeX, Mic, MicOff, LogOut, MousePointerClick } from 'lucide-react';
+import { Monitor, Loader2, Maximize, Volume2, VolumeX, Mic, MicOff, LogOut, MousePointerClick, AlertTriangle } from 'lucide-react';
 import { toast } from 'sonner';
 
 export interface ScreenShareViewerProps {
@@ -13,17 +13,24 @@ export interface ScreenShareViewerProps {
 
 export type ViewerStatus = 'connecting' | 'waiting' | 'receiving' | 'ended' | 'error' | 'left';
 
+// Data channel message types
+interface DataMessage {
+  type: 'meeting-ended' | 'viewer-muted' | 'viewer-unmuted';
+  viewerId?: string;
+}
+
 const ScreenShareViewer = ({ roomId, peerConfig }: ScreenShareViewerProps) => {
   const [status, setStatus] = useState<ViewerStatus>('connecting');
   const [error, setError] = useState<string | null>(null);
   const [isMuted, setIsMuted] = useState(true);
   const [showAudioOverlay, setShowAudioOverlay] = useState(true);
   const [isMicEnabled, setIsMicEnabled] = useState(false);
-  const [isMicMuted, setIsMicMuted] = useState(true);
+  const [isPushToTalkActive, setIsPushToTalkActive] = useState(false);
+  const [isMutedByPresenter, setIsMutedByPresenter] = useState(false);
 
   const peerRef = useRef<Peer | null>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
-  const connectionRef = useRef<any>(null);
+  const connectionRef = useRef<DataConnection | null>(null);
   const callRef = useRef<MediaConnection | null>(null);
   const micStreamRef = useRef<MediaStream | null>(null);
   const micCallRef = useRef<MediaConnection | null>(null);
@@ -73,13 +80,13 @@ const ScreenShareViewer = ({ roomId, peerConfig }: ScreenShareViewerProps) => {
 
     setStatus('left');
     setIsMicEnabled(false);
-    setIsMicMuted(true);
+    setIsPushToTalkActive(false);
+    setIsMutedByPresenter(false);
     toast.success('You have left the meeting');
   }, [cleanupConnections]);
 
   // Rejoin meeting handler
   const rejoinMeeting = useCallback(() => {
-    // Simply reload the page to rejoin
     window.location.reload();
   }, []);
 
@@ -105,6 +112,31 @@ const ScreenShareViewer = ({ roomId, peerConfig }: ScreenShareViewerProps) => {
 
       conn.on('open', () => {
         console.log('Connected to presenter data channel');
+      });
+
+      // Handle data messages from presenter
+      conn.on('data', (data) => {
+        const message = data as DataMessage;
+        console.log('Received message from presenter:', message);
+
+        if (message.type === 'meeting-ended') {
+          setStatus('ended');
+          cleanupConnections();
+          toast.info('The presenter has ended the meeting');
+        } else if (message.type === 'viewer-muted') {
+          setIsMutedByPresenter(true);
+          // Immediately disable audio sending
+          if (micStreamRef.current) {
+            const audioTrack = micStreamRef.current.getAudioTracks()[0];
+            if (audioTrack) {
+              audioTrack.enabled = false;
+            }
+          }
+          toast.warning('You have been muted by the presenter');
+        } else if (message.type === 'viewer-unmuted') {
+          setIsMutedByPresenter(false);
+          toast.success('The presenter has unmuted you');
+        }
       });
 
       conn.on('close', () => {
@@ -245,7 +277,7 @@ const ScreenShareViewer = ({ roomId, peerConfig }: ScreenShareViewerProps) => {
     }
   }, [isMuted]);
 
-  // Enable viewer microphone (two-way audio)
+  // Enable viewer microphone for push-to-talk
   const enableMicrophone = useCallback(async () => {
     if (!peerRef.current) {
       toast.error('Not connected to room');
@@ -257,7 +289,7 @@ const ScreenShareViewer = ({ roomId, peerConfig }: ScreenShareViewerProps) => {
       const micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
       micStreamRef.current = micStream;
       
-      // Start muted by default
+      // Start with mic disabled (push-to-talk)
       const audioTrack = micStream.getAudioTracks()[0];
       if (audioTrack) {
         audioTrack.enabled = false;
@@ -274,26 +306,40 @@ const ScreenShareViewer = ({ roomId, peerConfig }: ScreenShareViewerProps) => {
       });
 
       setIsMicEnabled(true);
-      setIsMicMuted(true);
-      toast.success('Microphone enabled (muted)');
+      setIsPushToTalkActive(false);
+      toast.success('Push-to-talk enabled - hold button to speak');
     } catch (err) {
       console.error('Error accessing microphone:', err);
       toast.error('Could not access microphone');
     }
   }, [roomId]);
 
-  // Toggle viewer microphone mute/unmute
-  const toggleViewerMic = useCallback(() => {
+  // Start push-to-talk (on mouse/touch down)
+  const startPushToTalk = useCallback(() => {
+    if (isMutedByPresenter) {
+      toast.error('You are muted by the presenter');
+      return;
+    }
+    
     if (micStreamRef.current) {
       const audioTrack = micStreamRef.current.getAudioTracks()[0];
       if (audioTrack) {
-        const newMutedState = !isMicMuted;
-        audioTrack.enabled = !newMutedState; // enabled is opposite of muted
-        setIsMicMuted(newMutedState);
-        toast.success(newMutedState ? 'Microphone muted' : 'Microphone unmuted');
+        audioTrack.enabled = true;
+        setIsPushToTalkActive(true);
       }
     }
-  }, [isMicMuted]);
+  }, [isMutedByPresenter]);
+
+  // Stop push-to-talk (on mouse/touch up)
+  const stopPushToTalk = useCallback(() => {
+    if (micStreamRef.current) {
+      const audioTrack = micStreamRef.current.getAudioTracks()[0];
+      if (audioTrack) {
+        audioTrack.enabled = false;
+        setIsPushToTalkActive(false);
+      }
+    }
+  }, []);
 
   // Disable viewer microphone completely
   const disableMicrophone = useCallback(() => {
@@ -306,9 +352,36 @@ const ScreenShareViewer = ({ roomId, peerConfig }: ScreenShareViewerProps) => {
       micCallRef.current = null;
     }
     setIsMicEnabled(false);
-    setIsMicMuted(true);
+    setIsPushToTalkActive(false);
     toast.success('Microphone disabled');
   }, []);
+
+  // Keyboard push-to-talk (Space key)
+  useEffect(() => {
+    if (!isMicEnabled) return;
+
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.code === 'Space' && !e.repeat && !isPushToTalkActive) {
+        e.preventDefault();
+        startPushToTalk();
+      }
+    };
+
+    const handleKeyUp = (e: KeyboardEvent) => {
+      if (e.code === 'Space') {
+        e.preventDefault();
+        stopPushToTalk();
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    window.addEventListener('keyup', handleKeyUp);
+
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+      window.removeEventListener('keyup', handleKeyUp);
+    };
+  }, [isMicEnabled, isPushToTalkActive, startPushToTalk, stopPushToTalk]);
 
   const getStatusMessage = () => {
     switch (status) {
@@ -319,7 +392,7 @@ const ScreenShareViewer = ({ roomId, peerConfig }: ScreenShareViewerProps) => {
       case 'receiving':
         return 'Receiving screen share';
       case 'ended':
-        return 'Presenter stopped sharing';
+        return 'Meeting has ended';
       case 'left':
         return 'You left the meeting';
       case 'error':
@@ -365,6 +438,30 @@ const ScreenShareViewer = ({ roomId, peerConfig }: ScreenShareViewerProps) => {
     );
   }
 
+  // Meeting ended state
+  if (status === 'ended') {
+    return (
+      <div className="min-h-screen bg-background p-6 flex items-center justify-center">
+        <Card className="max-w-md w-full">
+          <CardContent className="pt-6 text-center space-y-6">
+            <div className="w-16 h-16 rounded-full bg-muted flex items-center justify-center mx-auto">
+              <Monitor className="w-8 h-8 text-muted-foreground" />
+            </div>
+            <div>
+              <h2 className="text-2xl font-bold text-foreground">Meeting Ended</h2>
+              <p className="text-muted-foreground mt-2">
+                The presenter has ended this meeting.
+              </p>
+            </div>
+            <Button onClick={rejoinMeeting} className="w-full">
+              Rejoin When Available
+            </Button>
+          </CardContent>
+        </Card>
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-screen bg-background p-6">
       <div className="max-w-5xl mx-auto space-y-6">
@@ -383,7 +480,7 @@ const ScreenShareViewer = ({ roomId, peerConfig }: ScreenShareViewerProps) => {
               ) : null}
               {getStatusMessage()}
             </Badge>
-            {status !== 'ended' && status !== 'error' && (
+            {status !== 'error' && (
               <Button
                 variant="outline"
                 size="sm"
@@ -396,6 +493,18 @@ const ScreenShareViewer = ({ roomId, peerConfig }: ScreenShareViewerProps) => {
             )}
           </div>
         </div>
+
+        {/* Muted by presenter warning */}
+        {isMutedByPresenter && (
+          <Card className="border-amber-500/50 bg-amber-500/10">
+            <CardContent className="pt-4">
+              <p className="text-sm text-amber-600 dark:text-amber-400 flex items-center gap-2">
+                <AlertTriangle className="w-4 h-4" />
+                You have been muted by the presenter. Push-to-talk is disabled.
+              </p>
+            </CardContent>
+          </Card>
+        )}
 
         {/* Error display */}
         {error && status === 'error' && (
@@ -415,7 +524,7 @@ const ScreenShareViewer = ({ roomId, peerConfig }: ScreenShareViewerProps) => {
             </CardTitle>
             {status === 'receiving' && (
               <div className="flex items-center gap-2">
-                {/* Viewer microphone controls */}
+                {/* Push-to-talk controls */}
                 {!isMicEnabled ? (
                   <Button
                     variant="outline"
@@ -424,18 +533,23 @@ const ScreenShareViewer = ({ roomId, peerConfig }: ScreenShareViewerProps) => {
                     className="flex items-center gap-1"
                   >
                     <Mic className="w-4 h-4" />
-                    Enable Mic
+                    Enable Push-to-Talk
                   </Button>
                 ) : (
                   <div className="flex items-center gap-1">
                     <Button
-                      variant={isMicMuted ? 'outline' : 'default'}
+                      variant={isPushToTalkActive ? 'default' : 'outline'}
                       size="sm"
-                      onClick={toggleViewerMic}
-                      className="flex items-center gap-1"
+                      onMouseDown={startPushToTalk}
+                      onMouseUp={stopPushToTalk}
+                      onMouseLeave={stopPushToTalk}
+                      onTouchStart={startPushToTalk}
+                      onTouchEnd={stopPushToTalk}
+                      disabled={isMutedByPresenter}
+                      className={`flex items-center gap-1 select-none ${isPushToTalkActive ? 'bg-green-500 hover:bg-green-600' : ''}`}
                     >
-                      {isMicMuted ? <MicOff className="w-4 h-4" /> : <Mic className="w-4 h-4" />}
-                      {isMicMuted ? 'Unmute Mic' : 'Mute Mic'}
+                      {isPushToTalkActive ? <Mic className="w-4 h-4 animate-pulse" /> : <MicOff className="w-4 h-4" />}
+                      {isPushToTalkActive ? 'Speaking...' : 'Hold to Talk'}
                     </Button>
                     <Button
                       variant="ghost"
@@ -493,7 +607,7 @@ const ScreenShareViewer = ({ roomId, peerConfig }: ScreenShareViewerProps) => {
               muted
               className={`w-full rounded-lg bg-black aspect-video ${status !== 'receiving' ? 'absolute opacity-0 pointer-events-none' : ''}`}
             />
-            {status !== 'receiving' && (
+            {(status === 'connecting' || status === 'waiting' || status === 'error') && (
               <div className="w-full aspect-video bg-muted rounded-lg flex flex-col items-center justify-center gap-3">
                 {(status === 'connecting' || status === 'waiting') && (
                   <Loader2 className="w-8 h-8 animate-spin text-muted-foreground" />
@@ -501,7 +615,6 @@ const ScreenShareViewer = ({ roomId, peerConfig }: ScreenShareViewerProps) => {
                 <p className="text-muted-foreground text-center">
                   {status === 'connecting' && 'Connecting to room...'}
                   {status === 'waiting' && 'Waiting for presenter to start sharing...'}
-                  {status === 'ended' && 'The presenter has stopped sharing their screen.'}
                   {status === 'error' && 'Unable to connect. Please refresh and try again.'}
                 </p>
               </div>
@@ -521,13 +634,13 @@ const ScreenShareViewer = ({ roomId, peerConfig }: ScreenShareViewerProps) => {
           </Card>
         )}
 
-        {/* Microphone info */}
-        {status === 'receiving' && isMicEnabled && !isMicMuted && (
-          <Card className="border-green-500/50 bg-green-500/10">
+        {/* Push-to-talk info */}
+        {status === 'receiving' && isMicEnabled && !isMutedByPresenter && (
+          <Card className="border-blue-500/50 bg-blue-500/10">
             <CardContent className="pt-4">
-              <p className="text-sm text-green-600 dark:text-green-400 flex items-center gap-2">
+              <p className="text-sm text-blue-600 dark:text-blue-400 flex items-center gap-2">
                 <Mic className="w-4 h-4" />
-                Your microphone is active - the presenter can hear you.
+                Push-to-talk is enabled. Hold the button or press <kbd className="px-1.5 py-0.5 bg-blue-500/20 rounded text-xs font-mono">Space</kbd> to speak.
               </p>
             </CardContent>
           </Card>

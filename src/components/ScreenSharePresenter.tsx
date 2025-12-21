@@ -3,7 +3,7 @@ import Peer, { DataConnection, MediaConnection } from 'peerjs';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
-import { Monitor, Users, StopCircle, Play, Copy, Check, Mic, MicOff, Maximize, Radio, UserPlus, UserMinus } from 'lucide-react';
+import { Monitor, Users, StopCircle, Play, Copy, Check, Mic, MicOff, Maximize, Radio, UserPlus, UserMinus, XCircle, Volume2, VolumeX } from 'lucide-react';
 import { toast } from 'sonner';
 
 export interface ScreenSharePresenterProps {
@@ -13,11 +13,23 @@ export interface ScreenSharePresenterProps {
 
 export type PresenterStatus = 'connecting' | 'ready' | 'sharing' | 'error';
 
+// Data channel message types
+interface DataMessage {
+  type: 'meeting-ended' | 'viewer-muted' | 'viewer-unmuted';
+  viewerId?: string;
+}
+
 // Viewer activity event for join/leave notifications
 interface ViewerActivity {
   type: 'join' | 'leave';
   viewerId: string;
   timestamp: number;
+}
+
+// Track viewer info including mute state
+interface ViewerInfo {
+  connection: DataConnection;
+  isMutedByPresenter: boolean;
 }
 
 const ScreenSharePresenter = ({ roomId, peerConfig }: ScreenSharePresenterProps) => {
@@ -28,6 +40,8 @@ const ScreenSharePresenter = ({ roomId, peerConfig }: ScreenSharePresenterProps)
   const [copied, setCopied] = useState(false);
   const [isMicOn, setIsMicOn] = useState(true);
   const [recentActivity, setRecentActivity] = useState<ViewerActivity[]>([]);
+  const [mutedViewers, setMutedViewers] = useState<Set<string>>(new Set());
+  const [isViewerAudioEnabled, setIsViewerAudioEnabled] = useState(false);
 
   const peerRef = useRef<Peer | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -37,12 +51,14 @@ const ScreenSharePresenter = ({ roomId, peerConfig }: ScreenSharePresenterProps)
   // Audio element for viewer audio playback
   const viewerAudioRef = useRef<HTMLAudioElement>(null);
 
-  // Track connected viewers by their peer IDs (data connections)
-  const viewerDataConnections = useRef<Map<string, DataConnection>>(new Map());
+  // Track connected viewers by their peer IDs with full info
+  const viewerConnections = useRef<Map<string, ViewerInfo>>(new Map());
   // Track active media calls to viewers
   const viewerMediaCalls = useRef<Map<string, MediaConnection>>(new Map());
   // Track incoming viewer audio streams
   const viewerAudioStreams = useRef<Map<string, MediaStream>>(new Map());
+  // Audio context for mixing viewer audio
+  const audioContextRef = useRef<AudioContext | null>(null);
 
   // Add viewer activity notification
   const addViewerActivity = useCallback((type: 'join' | 'leave', viewerId: string) => {
@@ -66,6 +82,97 @@ const ScreenSharePresenter = ({ roomId, peerConfig }: ScreenSharePresenterProps)
       setRecentActivity(prev => prev.filter(a => a.timestamp !== activity.timestamp));
     }, 5000);
   }, []);
+
+  // Send data message to specific viewer
+  const sendToViewer = useCallback((viewerId: string, message: DataMessage) => {
+    const viewerInfo = viewerConnections.current.get(viewerId);
+    if (viewerInfo?.connection.open) {
+      viewerInfo.connection.send(message);
+    }
+  }, []);
+
+  // Send data message to all viewers
+  const broadcastToViewers = useCallback((message: DataMessage) => {
+    viewerConnections.current.forEach((viewerInfo, viewerId) => {
+      if (viewerInfo.connection.open) {
+        viewerInfo.connection.send(message);
+      }
+    });
+  }, []);
+
+  // Mute a specific viewer
+  const muteViewer = useCallback((viewerId: string) => {
+    sendToViewer(viewerId, { type: 'viewer-muted', viewerId });
+    const viewerInfo = viewerConnections.current.get(viewerId);
+    if (viewerInfo) {
+      viewerInfo.isMutedByPresenter = true;
+    }
+    setMutedViewers(prev => new Set([...prev, viewerId]));
+    toast.success('Viewer muted');
+  }, [sendToViewer]);
+
+  // Unmute a specific viewer
+  const unmuteViewer = useCallback((viewerId: string) => {
+    sendToViewer(viewerId, { type: 'viewer-unmuted', viewerId });
+    const viewerInfo = viewerConnections.current.get(viewerId);
+    if (viewerInfo) {
+      viewerInfo.isMutedByPresenter = false;
+    }
+    setMutedViewers(prev => {
+      const next = new Set(prev);
+      next.delete(viewerId);
+      return next;
+    });
+    toast.success('Viewer unmuted');
+  }, [sendToViewer]);
+
+  // End meeting and clean up
+  const endMeeting = useCallback(() => {
+    // Notify all viewers
+    broadcastToViewers({ type: 'meeting-ended' });
+
+    // Stop all tracks
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach(track => track.stop());
+      streamRef.current = null;
+    }
+    audioTrackRef.current = null;
+
+    // Close all media calls
+    viewerMediaCalls.current.forEach((call) => {
+      call.close();
+    });
+    viewerMediaCalls.current.clear();
+
+    // Close all data connections
+    viewerConnections.current.forEach((viewerInfo) => {
+      viewerInfo.connection.close();
+    });
+    viewerConnections.current.clear();
+
+    // Clear viewer audio streams
+    viewerAudioStreams.current.clear();
+
+    // Close audio context
+    if (audioContextRef.current) {
+      audioContextRef.current.close();
+      audioContextRef.current = null;
+    }
+
+    // Clear video preview
+    if (videoRef.current) {
+      videoRef.current.srcObject = null;
+    }
+
+    // Reset state
+    setIsSharing(false);
+    setViewerCount(0);
+    setMutedViewers(new Set());
+    setIsViewerAudioEnabled(false);
+    setStatus('ready');
+    
+    toast.success('Meeting ended');
+  }, [broadcastToViewers]);
 
   // Initialize PeerJS connection
   useEffect(() => {
@@ -97,10 +204,10 @@ const ScreenSharePresenter = ({ roomId, peerConfig }: ScreenSharePresenterProps)
     peerRef.current = peer;
 
     return () => {
-      stopSharing();
+      endMeeting();
       peer.destroy();
     };
-  }, [roomId, peerConfig]);
+  }, [roomId, peerConfig, endMeeting]);
 
   // Handle incoming viewer data connections
   useEffect(() => {
@@ -113,9 +220,12 @@ const ScreenSharePresenter = ({ roomId, peerConfig }: ScreenSharePresenterProps)
       conn.on('open', () => {
         console.log('Viewer data connection open:', conn.peer);
 
-        // Store the data connection
-        viewerDataConnections.current.set(conn.peer, conn);
-        setViewerCount(viewerDataConnections.current.size);
+        // Store the data connection with mute state
+        viewerConnections.current.set(conn.peer, {
+          connection: conn,
+          isMutedByPresenter: false,
+        });
+        setViewerCount(viewerConnections.current.size);
         addViewerActivity('join', conn.peer);
 
         // If we're already sharing, immediately call this viewer with the stream
@@ -127,19 +237,29 @@ const ScreenSharePresenter = ({ roomId, peerConfig }: ScreenSharePresenterProps)
 
       conn.on('close', () => {
         console.log('Viewer data connection closed:', conn.peer);
-        viewerDataConnections.current.delete(conn.peer);
+        viewerConnections.current.delete(conn.peer);
         viewerMediaCalls.current.delete(conn.peer);
         viewerAudioStreams.current.delete(conn.peer);
-        setViewerCount(viewerDataConnections.current.size);
+        setMutedViewers(prev => {
+          const next = new Set(prev);
+          next.delete(conn.peer);
+          return next;
+        });
+        setViewerCount(viewerConnections.current.size);
         addViewerActivity('leave', conn.peer);
       });
 
       conn.on('error', (err) => {
         console.error('Viewer data connection error:', err);
-        viewerDataConnections.current.delete(conn.peer);
+        viewerConnections.current.delete(conn.peer);
         viewerMediaCalls.current.delete(conn.peer);
         viewerAudioStreams.current.delete(conn.peer);
-        setViewerCount(viewerDataConnections.current.size);
+        setMutedViewers(prev => {
+          const next = new Set(prev);
+          next.delete(conn.peer);
+          return next;
+        });
+        setViewerCount(viewerConnections.current.size);
       });
     };
 
@@ -150,7 +270,7 @@ const ScreenSharePresenter = ({ roomId, peerConfig }: ScreenSharePresenterProps)
     };
   }, [isSharing, addViewerActivity]);
 
-  // Handle incoming calls from viewers (for two-way audio)
+  // Handle incoming calls from viewers (for two-way audio / push-to-talk)
   useEffect(() => {
     const peer = peerRef.current;
     if (!peer) return;
@@ -167,22 +287,8 @@ const ScreenSharePresenter = ({ roomId, peerConfig }: ScreenSharePresenterProps)
         // Store viewer audio stream
         viewerAudioStreams.current.set(call.peer, remoteStream);
         
-        // Play viewer audio (start muted for autoplay policy, user can unmute)
-        if (viewerAudioRef.current) {
-          // Combine all viewer audio streams into one
-          const audioContext = new AudioContext();
-          const destination = audioContext.createMediaStreamDestination();
-          
-          viewerAudioStreams.current.forEach((stream) => {
-            const source = audioContext.createMediaStreamSource(stream);
-            source.connect(destination);
-          });
-          
-          viewerAudioRef.current.srcObject = destination.stream;
-          viewerAudioRef.current.play().catch(err => {
-            console.log('Viewer audio autoplay blocked, user interaction required:', err);
-          });
-        }
+        // Rebuild audio mix
+        updateViewerAudioMix();
         
         toast.success('Viewer microphone connected');
       });
@@ -190,6 +296,7 @@ const ScreenSharePresenter = ({ roomId, peerConfig }: ScreenSharePresenterProps)
       call.on('close', () => {
         console.log('Viewer audio call closed:', call.peer);
         viewerAudioStreams.current.delete(call.peer);
+        updateViewerAudioMix();
       });
     };
 
@@ -198,6 +305,41 @@ const ScreenSharePresenter = ({ roomId, peerConfig }: ScreenSharePresenterProps)
     return () => {
       peer.off('call', handleCall);
     };
+  }, []);
+
+  // Update viewer audio mix
+  const updateViewerAudioMix = useCallback(() => {
+    if (!viewerAudioRef.current) return;
+    
+    // Create or reuse audio context
+    if (!audioContextRef.current || audioContextRef.current.state === 'closed') {
+      audioContextRef.current = new AudioContext();
+    }
+    
+    const audioContext = audioContextRef.current;
+    const destination = audioContext.createMediaStreamDestination();
+    
+    viewerAudioStreams.current.forEach((stream) => {
+      const source = audioContext.createMediaStreamSource(stream);
+      source.connect(destination);
+    });
+    
+    viewerAudioRef.current.srcObject = destination.stream;
+    viewerAudioRef.current.play().catch(err => {
+      console.log('Viewer audio autoplay blocked, user interaction required:', err);
+    });
+  }, []);
+
+  // Enable viewer audio playback (user interaction required)
+  const enableViewerAudio = useCallback(() => {
+    if (viewerAudioRef.current) {
+      viewerAudioRef.current.muted = false;
+      setIsViewerAudioEnabled(true);
+      viewerAudioRef.current.play().catch(err => {
+        console.error('Error playing viewer audio:', err);
+      });
+      toast.success('Viewer audio enabled');
+    }
   }, []);
 
   // Call a viewer with the stream
@@ -272,8 +414,8 @@ const ScreenSharePresenter = ({ roomId, peerConfig }: ScreenSharePresenterProps)
       };
 
       // Call all currently connected viewers
-      console.log('Calling all connected viewers:', viewerDataConnections.current.size);
-      viewerDataConnections.current.forEach((_, viewerId) => {
+      console.log('Calling all connected viewers:', viewerConnections.current.size);
+      viewerConnections.current.forEach((_, viewerId) => {
         callViewer(viewerId, outboundStream);
       });
 
@@ -341,6 +483,9 @@ const ScreenSharePresenter = ({ roomId, peerConfig }: ScreenSharePresenterProps)
     toast.success('Viewer link copied to clipboard');
     setTimeout(() => setCopied(false), 2000);
   }, [roomId]);
+
+  // Get list of connected viewer IDs for display
+  const connectedViewerIds = Array.from(viewerConnections.current.keys());
 
   return (
     <div className="min-h-screen bg-background p-6">
@@ -429,7 +574,7 @@ const ScreenSharePresenter = ({ roomId, peerConfig }: ScreenSharePresenterProps)
                 <>
                   <Button
                     onClick={stopSharing}
-                    variant="destructive"
+                    variant="secondary"
                     className="flex items-center gap-2"
                   >
                     <StopCircle className="w-4 h-4" />
@@ -442,6 +587,14 @@ const ScreenSharePresenter = ({ roomId, peerConfig }: ScreenSharePresenterProps)
                   >
                     {isMicOn ? <Mic className="w-4 h-4" /> : <MicOff className="w-4 h-4" />}
                     {isMicOn ? 'Mic On' : 'Mic Off'}
+                  </Button>
+                  <Button
+                    onClick={endMeeting}
+                    variant="destructive"
+                    className="flex items-center gap-2"
+                  >
+                    <XCircle className="w-4 h-4" />
+                    End Meeting
                   </Button>
                 </>
               )}
@@ -460,6 +613,56 @@ const ScreenSharePresenter = ({ roomId, peerConfig }: ScreenSharePresenterProps)
             </div>
           </CardContent>
         </Card>
+
+        {/* Viewer Management */}
+        {viewerCount > 0 && (
+          <Card>
+            <CardHeader className="flex flex-row items-center justify-between">
+              <CardTitle className="flex items-center gap-2">
+                <Users className="w-5 h-5" />
+                Connected Viewers ({viewerCount})
+              </CardTitle>
+              {viewerAudioStreams.current.size > 0 && (
+                <Button
+                  variant={isViewerAudioEnabled ? 'secondary' : 'outline'}
+                  size="sm"
+                  onClick={enableViewerAudio}
+                  className="flex items-center gap-1"
+                >
+                  {isViewerAudioEnabled ? <Volume2 className="w-4 h-4" /> : <VolumeX className="w-4 h-4" />}
+                  {isViewerAudioEnabled ? 'Viewer Audio On' : 'Enable Viewer Audio'}
+                </Button>
+              )}
+            </CardHeader>
+            <CardContent>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                {connectedViewerIds.map((viewerId) => {
+                  const shortId = viewerId.split('-').pop() || viewerId;
+                  const isMuted = mutedViewers.has(viewerId);
+                  return (
+                    <div
+                      key={viewerId}
+                      className="flex items-center justify-between p-2 rounded-lg bg-muted/50"
+                    >
+                      <span className="text-sm font-medium">
+                        Viewer {shortId.slice(0, 6)}
+                      </span>
+                      <Button
+                        variant={isMuted ? 'outline' : 'ghost'}
+                        size="sm"
+                        onClick={() => isMuted ? unmuteViewer(viewerId) : muteViewer(viewerId)}
+                        className="flex items-center gap-1"
+                      >
+                        {isMuted ? <VolumeX className="w-3 h-3" /> : <Volume2 className="w-3 h-3" />}
+                        {isMuted ? 'Unmute' : 'Mute'}
+                      </Button>
+                    </div>
+                  );
+                })}
+              </div>
+            </CardContent>
+          </Card>
+        )}
 
         {/* Preview */}
         <Card>
