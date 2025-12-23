@@ -42,6 +42,7 @@ const ScreenSharePresenter = ({ roomId, peerConfig }: ScreenSharePresenterProps)
   const [recentActivity, setRecentActivity] = useState<ViewerActivity[]>([]);
   const [mutedViewers, setMutedViewers] = useState<Set<string>>(new Set());
   const [isViewerAudioEnabled, setIsViewerAudioEnabled] = useState(false);
+  const [isSpeakerMuted, setIsSpeakerMuted] = useState(false);
 
   const peerRef = useRef<Peer | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -169,6 +170,7 @@ const ScreenSharePresenter = ({ roomId, peerConfig }: ScreenSharePresenterProps)
     setViewerCount(0);
     setMutedViewers(new Set());
     setIsViewerAudioEnabled(false);
+    setIsSpeakerMuted(false);
     setStatus('ready');
     
     toast.success('Meeting ended');
@@ -247,6 +249,8 @@ const ScreenSharePresenter = ({ roomId, peerConfig }: ScreenSharePresenterProps)
         });
         setViewerCount(viewerConnections.current.size);
         addViewerActivity('leave', conn.peer);
+        // Update audio mix when viewer leaves
+        updateViewerAudioMix();
       });
 
       conn.on('error', (err) => {
@@ -270,7 +274,7 @@ const ScreenSharePresenter = ({ roomId, peerConfig }: ScreenSharePresenterProps)
     };
   }, [isSharing, addViewerActivity]);
 
-  // Handle incoming calls from viewers (for two-way audio / push-to-talk)
+  // Handle incoming calls from viewers (for two-way audio)
   useEffect(() => {
     const peer = peerRef.current;
     if (!peer) return;
@@ -311,6 +315,12 @@ const ScreenSharePresenter = ({ roomId, peerConfig }: ScreenSharePresenterProps)
   const updateViewerAudioMix = useCallback(() => {
     if (!viewerAudioRef.current) return;
     
+    // If no viewer audio streams, clear the audio
+    if (viewerAudioStreams.current.size === 0) {
+      viewerAudioRef.current.srcObject = null;
+      return;
+    }
+    
     // Create or reuse audio context
     if (!audioContextRef.current || audioContextRef.current.state === 'closed') {
       audioContextRef.current = new AudioContext();
@@ -325,22 +335,34 @@ const ScreenSharePresenter = ({ roomId, peerConfig }: ScreenSharePresenterProps)
     });
     
     viewerAudioRef.current.srcObject = destination.stream;
+    viewerAudioRef.current.muted = isSpeakerMuted;
     viewerAudioRef.current.play().catch(err => {
       console.log('Viewer audio autoplay blocked, user interaction required:', err);
     });
-  }, []);
+  }, [isSpeakerMuted]);
 
   // Enable viewer audio playback (user interaction required)
   const enableViewerAudio = useCallback(() => {
     if (viewerAudioRef.current) {
       viewerAudioRef.current.muted = false;
       setIsViewerAudioEnabled(true);
+      setIsSpeakerMuted(false);
       viewerAudioRef.current.play().catch(err => {
         console.error('Error playing viewer audio:', err);
       });
       toast.success('Viewer audio enabled');
     }
   }, []);
+
+  // Toggle speaker mute for viewer audio
+  const toggleSpeakerMute = useCallback(() => {
+    if (viewerAudioRef.current) {
+      const newMuted = !isSpeakerMuted;
+      viewerAudioRef.current.muted = newMuted;
+      setIsSpeakerMuted(newMuted);
+      toast.success(newMuted ? 'Speaker muted' : 'Speaker unmuted');
+    }
+  }, [isSpeakerMuted]);
 
   // Call a viewer with the stream
   const callViewer = useCallback((viewerId: string, stream: MediaStream) => {
@@ -486,6 +508,7 @@ const ScreenSharePresenter = ({ roomId, peerConfig }: ScreenSharePresenterProps)
 
   // Get list of connected viewer IDs for display
   const connectedViewerIds = Array.from(viewerConnections.current.keys());
+  const hasViewerAudio = viewerAudioStreams.current.size > 0;
 
   return (
     <div className="min-h-screen bg-background p-6">
@@ -622,16 +645,30 @@ const ScreenSharePresenter = ({ roomId, peerConfig }: ScreenSharePresenterProps)
                 <Users className="w-5 h-5" />
                 Connected Viewers ({viewerCount})
               </CardTitle>
-              {viewerAudioStreams.current.size > 0 && (
-                <Button
-                  variant={isViewerAudioEnabled ? 'secondary' : 'outline'}
-                  size="sm"
-                  onClick={enableViewerAudio}
-                  className="flex items-center gap-1"
-                >
-                  {isViewerAudioEnabled ? <Volume2 className="w-4 h-4" /> : <VolumeX className="w-4 h-4" />}
-                  {isViewerAudioEnabled ? 'Viewer Audio On' : 'Enable Viewer Audio'}
-                </Button>
+              {hasViewerAudio && (
+                <div className="flex items-center gap-2">
+                  {!isViewerAudioEnabled ? (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={enableViewerAudio}
+                      className="flex items-center gap-1"
+                    >
+                      <VolumeX className="w-4 h-4" />
+                      Enable Viewer Audio
+                    </Button>
+                  ) : (
+                    <Button
+                      variant={isSpeakerMuted ? 'outline' : 'secondary'}
+                      size="sm"
+                      onClick={toggleSpeakerMute}
+                      className="flex items-center gap-1"
+                    >
+                      {isSpeakerMuted ? <VolumeX className="w-4 h-4" /> : <Volume2 className="w-4 h-4" />}
+                      {isSpeakerMuted ? 'Unmute Speaker' : 'Mute Speaker'}
+                    </Button>
+                  )}
+                </div>
               )}
             </CardHeader>
             <CardContent>
@@ -639,21 +676,30 @@ const ScreenSharePresenter = ({ roomId, peerConfig }: ScreenSharePresenterProps)
                 {connectedViewerIds.map((viewerId) => {
                   const shortId = viewerId.split('-').pop() || viewerId;
                   const isMuted = mutedViewers.has(viewerId);
+                  const hasAudio = viewerAudioStreams.current.has(viewerId);
                   return (
                     <div
                       key={viewerId}
                       className="flex items-center justify-between p-2 rounded-lg bg-muted/50"
                     >
-                      <span className="text-sm font-medium">
-                        Viewer {shortId.slice(0, 6)}
-                      </span>
+                      <div className="flex items-center gap-2">
+                        <span className="text-sm font-medium">
+                          Viewer {shortId.slice(0, 6)}
+                        </span>
+                        {hasAudio && !isMuted && (
+                          <Badge variant="outline" className="text-xs">
+                            <Mic className="w-3 h-3 mr-1" />
+                            Mic On
+                          </Badge>
+                        )}
+                      </div>
                       <Button
                         variant={isMuted ? 'outline' : 'ghost'}
                         size="sm"
                         onClick={() => isMuted ? unmuteViewer(viewerId) : muteViewer(viewerId)}
                         className="flex items-center gap-1"
                       >
-                        {isMuted ? <VolumeX className="w-3 h-3" /> : <Volume2 className="w-3 h-3" />}
+                        {isMuted ? <MicOff className="w-3 h-3" /> : <Mic className="w-3 h-3" />}
                         {isMuted ? 'Unmute' : 'Mute'}
                       </Button>
                     </div>

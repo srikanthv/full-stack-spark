@@ -25,7 +25,7 @@ const ScreenShareViewer = ({ roomId, peerConfig }: ScreenShareViewerProps) => {
   const [isMuted, setIsMuted] = useState(true);
   const [showAudioOverlay, setShowAudioOverlay] = useState(true);
   const [isMicEnabled, setIsMicEnabled] = useState(false);
-  const [isPushToTalkActive, setIsPushToTalkActive] = useState(false);
+  const [isMicMuted, setIsMicMuted] = useState(false); // Local mic mute (viewer controls)
   const [isMutedByPresenter, setIsMutedByPresenter] = useState(false);
 
   const peerRef = useRef<Peer | null>(null);
@@ -80,7 +80,7 @@ const ScreenShareViewer = ({ roomId, peerConfig }: ScreenShareViewerProps) => {
 
     setStatus('left');
     setIsMicEnabled(false);
-    setIsPushToTalkActive(false);
+    setIsMicMuted(false);
     setIsMutedByPresenter(false);
     toast.success('You have left the meeting');
   }, [cleanupConnections]);
@@ -135,6 +135,13 @@ const ScreenShareViewer = ({ roomId, peerConfig }: ScreenShareViewerProps) => {
           toast.warning('You have been muted by the presenter');
         } else if (message.type === 'viewer-unmuted') {
           setIsMutedByPresenter(false);
+          // Re-enable audio if mic is on and not locally muted
+          if (micStreamRef.current && isMicEnabled && !isMicMuted) {
+            const audioTrack = micStreamRef.current.getAudioTracks()[0];
+            if (audioTrack) {
+              audioTrack.enabled = true;
+            }
+          }
           toast.success('The presenter has unmuted you');
         }
       });
@@ -266,18 +273,18 @@ const ScreenShareViewer = ({ roomId, peerConfig }: ScreenShareViewerProps) => {
     }
   }, []);
 
-  // Toggle mute/unmute locally (does not affect WebRTC tracks)
-  const toggleMute = useCallback(() => {
+  // Toggle speaker mute/unmute locally (does not affect WebRTC tracks)
+  const toggleSpeakerMute = useCallback(() => {
     if (videoRef.current) {
       const newMutedState = !isMuted;
       videoRef.current.muted = newMutedState;
       setIsMuted(newMutedState);
       setShowAudioOverlay(false);
-      toast.success(newMutedState ? 'Audio muted' : 'Audio unmuted');
+      toast.success(newMutedState ? 'Speaker muted' : 'Speaker unmuted');
     }
   }, [isMuted]);
 
-  // Enable viewer microphone for push-to-talk
+  // Enable viewer microphone (simple toggle, not push-to-talk)
   const enableMicrophone = useCallback(async () => {
     if (!peerRef.current) {
       toast.error('Not connected to room');
@@ -289,10 +296,10 @@ const ScreenShareViewer = ({ roomId, peerConfig }: ScreenShareViewerProps) => {
       const micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
       micStreamRef.current = micStream;
       
-      // Start with mic disabled (push-to-talk)
+      // Start with mic enabled (audio is actively sent)
       const audioTrack = micStream.getAudioTracks()[0];
       if (audioTrack) {
-        audioTrack.enabled = false;
+        audioTrack.enabled = !isMutedByPresenter; // Respect presenter mute
       }
       
       // Call presenter with our audio stream
@@ -306,16 +313,16 @@ const ScreenShareViewer = ({ roomId, peerConfig }: ScreenShareViewerProps) => {
       });
 
       setIsMicEnabled(true);
-      setIsPushToTalkActive(false);
-      toast.success('Push-to-talk enabled - hold button to speak');
+      setIsMicMuted(false);
+      toast.success('Microphone enabled');
     } catch (err) {
       console.error('Error accessing microphone:', err);
       toast.error('Could not access microphone');
     }
-  }, [roomId]);
+  }, [roomId, isMutedByPresenter]);
 
-  // Start push-to-talk (on mouse/touch down)
-  const startPushToTalk = useCallback(() => {
+  // Toggle microphone mute (viewer controls whether audio is sent)
+  const toggleMicMute = useCallback(() => {
     if (isMutedByPresenter) {
       toast.error('You are muted by the presenter');
       return;
@@ -324,22 +331,13 @@ const ScreenShareViewer = ({ roomId, peerConfig }: ScreenShareViewerProps) => {
     if (micStreamRef.current) {
       const audioTrack = micStreamRef.current.getAudioTracks()[0];
       if (audioTrack) {
-        audioTrack.enabled = true;
-        setIsPushToTalkActive(true);
+        const newMutedState = !isMicMuted;
+        audioTrack.enabled = !newMutedState;
+        setIsMicMuted(newMutedState);
+        toast.success(newMutedState ? 'Microphone muted' : 'Microphone unmuted');
       }
     }
-  }, [isMutedByPresenter]);
-
-  // Stop push-to-talk (on mouse/touch up)
-  const stopPushToTalk = useCallback(() => {
-    if (micStreamRef.current) {
-      const audioTrack = micStreamRef.current.getAudioTracks()[0];
-      if (audioTrack) {
-        audioTrack.enabled = false;
-        setIsPushToTalkActive(false);
-      }
-    }
-  }, []);
+  }, [isMicMuted, isMutedByPresenter]);
 
   // Disable viewer microphone completely
   const disableMicrophone = useCallback(() => {
@@ -352,36 +350,9 @@ const ScreenShareViewer = ({ roomId, peerConfig }: ScreenShareViewerProps) => {
       micCallRef.current = null;
     }
     setIsMicEnabled(false);
-    setIsPushToTalkActive(false);
+    setIsMicMuted(false);
     toast.success('Microphone disabled');
   }, []);
-
-  // Keyboard push-to-talk (Space key)
-  useEffect(() => {
-    if (!isMicEnabled) return;
-
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.code === 'Space' && !e.repeat && !isPushToTalkActive) {
-        e.preventDefault();
-        startPushToTalk();
-      }
-    };
-
-    const handleKeyUp = (e: KeyboardEvent) => {
-      if (e.code === 'Space') {
-        e.preventDefault();
-        stopPushToTalk();
-      }
-    };
-
-    window.addEventListener('keydown', handleKeyDown);
-    window.addEventListener('keyup', handleKeyUp);
-
-    return () => {
-      window.removeEventListener('keydown', handleKeyDown);
-      window.removeEventListener('keyup', handleKeyUp);
-    };
-  }, [isMicEnabled, isPushToTalkActive, startPushToTalk, stopPushToTalk]);
 
   const getStatusMessage = () => {
     switch (status) {
@@ -462,6 +433,9 @@ const ScreenShareViewer = ({ roomId, peerConfig }: ScreenShareViewerProps) => {
     );
   }
 
+  // Determine effective mic state for display
+  const isMicEffectivelyMuted = isMutedByPresenter || isMicMuted;
+
   return (
     <div className="min-h-screen bg-background p-6">
       <div className="max-w-5xl mx-auto space-y-6">
@@ -500,7 +474,7 @@ const ScreenShareViewer = ({ roomId, peerConfig }: ScreenShareViewerProps) => {
             <CardContent className="pt-4">
               <p className="text-sm text-amber-600 dark:text-amber-400 flex items-center gap-2">
                 <AlertTriangle className="w-4 h-4" />
-                You have been muted by the presenter. Push-to-talk is disabled.
+                You have been muted by the presenter. Your microphone is disabled.
               </p>
             </CardContent>
           </Card>
@@ -524,7 +498,7 @@ const ScreenShareViewer = ({ roomId, peerConfig }: ScreenShareViewerProps) => {
             </CardTitle>
             {status === 'receiving' && (
               <div className="flex items-center gap-2">
-                {/* Push-to-talk controls */}
+                {/* Microphone controls */}
                 {!isMicEnabled ? (
                   <Button
                     variant="outline"
@@ -533,40 +507,37 @@ const ScreenShareViewer = ({ roomId, peerConfig }: ScreenShareViewerProps) => {
                     className="flex items-center gap-1"
                   >
                     <Mic className="w-4 h-4" />
-                    Enable Push-to-Talk
+                    Enable Mic
                   </Button>
                 ) : (
                   <div className="flex items-center gap-1">
                     <Button
-                      variant={isPushToTalkActive ? 'default' : 'outline'}
+                      variant={isMicEffectivelyMuted ? 'outline' : 'default'}
                       size="sm"
-                      onMouseDown={startPushToTalk}
-                      onMouseUp={stopPushToTalk}
-                      onMouseLeave={stopPushToTalk}
-                      onTouchStart={startPushToTalk}
-                      onTouchEnd={stopPushToTalk}
+                      onClick={toggleMicMute}
                       disabled={isMutedByPresenter}
-                      className={`flex items-center gap-1 select-none ${isPushToTalkActive ? 'bg-green-500 hover:bg-green-600' : ''}`}
+                      className={`flex items-center gap-1 ${!isMicEffectivelyMuted ? 'bg-green-500 hover:bg-green-600' : ''}`}
                     >
-                      {isPushToTalkActive ? <Mic className="w-4 h-4 animate-pulse" /> : <MicOff className="w-4 h-4" />}
-                      {isPushToTalkActive ? 'Speaking...' : 'Hold to Talk'}
+                      {isMicEffectivelyMuted ? <MicOff className="w-4 h-4" /> : <Mic className="w-4 h-4" />}
+                      {isMicEffectivelyMuted ? 'Mic Off' : 'Mic On'}
                     </Button>
                     <Button
                       variant="ghost"
                       size="sm"
                       onClick={disableMicrophone}
                       className="text-destructive hover:text-destructive"
+                      title="Disable microphone"
                     >
                       <MicOff className="w-4 h-4" />
                     </Button>
                   </div>
                 )}
                 <div className="h-4 w-px bg-border" />
-                {/* Audio controls */}
+                {/* Speaker controls */}
                 <Button
                   variant="ghost"
                   size="sm"
-                  onClick={toggleMute}
+                  onClick={toggleSpeakerMute}
                   className="flex items-center gap-1"
                 >
                   {isMuted ? <VolumeX className="w-4 h-4" /> : <Volume2 className="w-4 h-4" />}
@@ -634,13 +605,13 @@ const ScreenShareViewer = ({ roomId, peerConfig }: ScreenShareViewerProps) => {
           </Card>
         )}
 
-        {/* Push-to-talk info */}
-        {status === 'receiving' && isMicEnabled && !isMutedByPresenter && (
-          <Card className="border-blue-500/50 bg-blue-500/10">
+        {/* Mic info */}
+        {status === 'receiving' && isMicEnabled && !isMutedByPresenter && !isMicMuted && (
+          <Card className="border-green-500/50 bg-green-500/10">
             <CardContent className="pt-4">
-              <p className="text-sm text-blue-600 dark:text-blue-400 flex items-center gap-2">
+              <p className="text-sm text-green-600 dark:text-green-400 flex items-center gap-2">
                 <Mic className="w-4 h-4" />
-                Push-to-talk is enabled. Hold the button or press <kbd className="px-1.5 py-0.5 bg-blue-500/20 rounded text-xs font-mono">Space</kbd> to speak.
+                Your microphone is on. The presenter can hear you.
               </p>
             </CardContent>
           </Card>
