@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
-import { Monitor, Users, ArrowRight } from 'lucide-react';
+import { Monitor, Users, ArrowRight, Presentation } from 'lucide-react';
 
 const Index = () => {
   const [roomId, setRoomId] = useState('');
@@ -22,6 +22,16 @@ const Index = () => {
     if (roomId.trim()) {
       navigate(`/viewer/${roomId.trim()}`);
     }
+  };
+
+  const handleStartDemo = () => {
+    const demoRoomId = roomId.trim() || generateRoomId();
+    // Open presenter controls in a new tab, keep current tab unchanged
+    window.open(
+      `${window.location.origin}/presenter-controls?roomId=${demoRoomId}`,
+      '_blank',
+      'noopener,noreferrer'
+    );
   };
 
   return (
@@ -99,6 +109,28 @@ const Index = () => {
             </CardContent>
           </Card>
         </div>
+
+        {/* Demo Mode Card */}
+        <Card className="border-primary/30 bg-primary/5">
+          <CardContent className="pt-6">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <div className="p-2 bg-primary/20 rounded-lg">
+                  <Presentation className="w-6 h-6 text-primary" />
+                </div>
+                <div>
+                  <h3 className="font-semibold">Start Live Demo</h3>
+                  <p className="text-sm text-muted-foreground">
+                    Opens controls in new tab — demo this app seamlessly
+                  </p>
+                </div>
+              </div>
+              <Button onClick={handleStartDemo} size="sm">
+                Launch
+              </Button>
+            </div>
+          </CardContent>
+        </Card>
 
         {/* Info */}
         <p className="text-xs text-center text-muted-foreground">
