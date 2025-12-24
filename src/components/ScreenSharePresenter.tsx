@@ -41,8 +41,9 @@ const ScreenSharePresenter = ({ roomId, peerConfig }: ScreenSharePresenterProps)
   const [isMicOn, setIsMicOn] = useState(true);
   const [recentActivity, setRecentActivity] = useState<ViewerActivity[]>([]);
   const [mutedViewers, setMutedViewers] = useState<Set<string>>(new Set());
-  const [isViewerAudioEnabled, setIsViewerAudioEnabled] = useState(false);
+const [isViewerAudioEnabled, setIsViewerAudioEnabled] = useState(false);
   const [isSpeakerMuted, setIsSpeakerMuted] = useState(false);
+  const [hasViewerAudio, setHasViewerAudio] = useState(false);
 
   const peerRef = useRef<Peer | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -167,6 +168,7 @@ const ScreenSharePresenter = ({ roomId, peerConfig }: ScreenSharePresenterProps)
     setMutedViewers(new Set());
     setIsViewerAudioEnabled(false);
     setIsSpeakerMuted(false);
+    setHasViewerAudio(false);
     setStatus('ready');
     
     toast.success('Meeting ended');
@@ -243,6 +245,9 @@ const ScreenSharePresenter = ({ roomId, peerConfig }: ScreenSharePresenterProps)
           audioEl.srcObject = null;
           audioEl.remove();
           viewerAudioElements.current.delete(conn.peer);
+          if (viewerAudioElements.current.size === 0) {
+            setHasViewerAudio(false);
+          }
         }
         setMutedViewers(prev => {
           const next = new Set(prev);
@@ -263,6 +268,9 @@ const ScreenSharePresenter = ({ roomId, peerConfig }: ScreenSharePresenterProps)
           audioEl.srcObject = null;
           audioEl.remove();
           viewerAudioElements.current.delete(conn.peer);
+          if (viewerAudioElements.current.size === 0) {
+            setHasViewerAudio(false);
+          }
         }
         setMutedViewers(prev => {
           const next = new Set(prev);
@@ -294,23 +302,36 @@ const ScreenSharePresenter = ({ roomId, peerConfig }: ScreenSharePresenterProps)
       call.on('stream', (remoteStream) => {
         console.log('Received audio stream from viewer:', call.peer, 'tracks:', remoteStream.getTracks().map(t => t.kind));
         
+        // Check if stream has audio tracks
+        const audioTracks = remoteStream.getAudioTracks();
+        if (audioTracks.length === 0) {
+          console.log('No audio tracks in viewer stream');
+          return;
+        }
+        
         // Create a dedicated audio element for this viewer
         let audioEl = viewerAudioElements.current.get(call.peer);
         if (!audioEl) {
           audioEl = document.createElement('audio');
-          audioEl.autoplay = true;
-          // Start muted for autoplay policy, user must click to enable
-          audioEl.muted = !isViewerAudioEnabled;
           viewerAudioContainerRef.current?.appendChild(audioEl);
           viewerAudioElements.current.set(call.peer, audioEl);
         }
         
+        // Set up the audio element
         audioEl.srcObject = remoteStream;
-        audioEl.play().catch(err => {
+        audioEl.muted = isSpeakerMuted;
+        audioEl.autoplay = true;
+        
+        // Try to play immediately (presenter has already interacted with page)
+        audioEl.play().then(() => {
+          console.log('Viewer audio playing successfully');
+        }).catch(err => {
           console.log('Viewer audio autoplay blocked:', err);
+          // If autoplay blocked, user will need to click enable button
         });
         
-        setIsViewerAudioEnabled(prev => prev); // Force re-render to show audio controls
+        setHasViewerAudio(true);
+        setIsViewerAudioEnabled(true);
         toast.success('Viewer microphone connected');
       });
 
@@ -322,6 +343,10 @@ const ScreenSharePresenter = ({ roomId, peerConfig }: ScreenSharePresenterProps)
           audioEl.remove();
           viewerAudioElements.current.delete(call.peer);
         }
+        // Update state if no more viewer audio
+        if (viewerAudioElements.current.size === 0) {
+          setHasViewerAudio(false);
+        }
       });
     };
 
@@ -330,7 +355,7 @@ const ScreenSharePresenter = ({ roomId, peerConfig }: ScreenSharePresenterProps)
     return () => {
       peer.off('call', handleCall);
     };
-  }, [isViewerAudioEnabled]);
+  }, [isSpeakerMuted]);
 
   // Enable viewer audio playback (user interaction required)
   const enableViewerAudio = useCallback(() => {
@@ -500,12 +525,11 @@ const ScreenSharePresenter = ({ roomId, peerConfig }: ScreenSharePresenterProps)
 
   // Get list of connected viewer IDs for display
   const connectedViewerIds = Array.from(viewerConnections.current.keys());
-  const hasViewerAudio = viewerAudioElements.current.size > 0;
 
   return (
     <div className="min-h-screen bg-background p-6">
-      {/* Hidden container for viewer audio elements */}
-      <div ref={viewerAudioContainerRef} className="hidden" />
+      {/* Audio container for viewer streams - visually hidden but active */}
+      <div ref={viewerAudioContainerRef} className="sr-only" aria-hidden="true" />
       
       <div className="max-w-4xl mx-auto space-y-6">
         {/* Header */}
