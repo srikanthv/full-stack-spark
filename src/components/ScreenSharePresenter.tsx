@@ -49,17 +49,15 @@ const ScreenSharePresenter = ({ roomId, peerConfig }: ScreenSharePresenterProps)
   const videoRef = useRef<HTMLVideoElement>(null);
   const audioTrackRef = useRef<MediaStreamTrack | null>(null);
   
-  // Audio element for viewer audio playback
-  const viewerAudioRef = useRef<HTMLAudioElement>(null);
+  // Container ref for viewer audio elements
+  const viewerAudioContainerRef = useRef<HTMLDivElement>(null);
 
   // Track connected viewers by their peer IDs with full info
   const viewerConnections = useRef<Map<string, ViewerInfo>>(new Map());
   // Track active media calls to viewers
   const viewerMediaCalls = useRef<Map<string, MediaConnection>>(new Map());
-  // Track incoming viewer audio streams
-  const viewerAudioStreams = useRef<Map<string, MediaStream>>(new Map());
-  // Audio context for mixing viewer audio
-  const audioContextRef = useRef<AudioContext | null>(null);
+  // Track incoming viewer audio streams and their audio elements
+  const viewerAudioElements = useRef<Map<string, HTMLAudioElement>>(new Map());
 
   // Add viewer activity notification
   const addViewerActivity = useCallback((type: 'join' | 'leave', viewerId: string) => {
@@ -151,14 +149,12 @@ const ScreenSharePresenter = ({ roomId, peerConfig }: ScreenSharePresenterProps)
     });
     viewerConnections.current.clear();
 
-    // Clear viewer audio streams
-    viewerAudioStreams.current.clear();
-
-    // Close audio context
-    if (audioContextRef.current) {
-      audioContextRef.current.close();
-      audioContextRef.current = null;
-    }
+    // Clear viewer audio elements
+    viewerAudioElements.current.forEach((audio) => {
+      audio.srcObject = null;
+      audio.remove();
+    });
+    viewerAudioElements.current.clear();
 
     // Clear video preview
     if (videoRef.current) {
@@ -241,7 +237,13 @@ const ScreenSharePresenter = ({ roomId, peerConfig }: ScreenSharePresenterProps)
         console.log('Viewer data connection closed:', conn.peer);
         viewerConnections.current.delete(conn.peer);
         viewerMediaCalls.current.delete(conn.peer);
-        viewerAudioStreams.current.delete(conn.peer);
+        // Clean up audio element for this viewer
+        const audioEl = viewerAudioElements.current.get(conn.peer);
+        if (audioEl) {
+          audioEl.srcObject = null;
+          audioEl.remove();
+          viewerAudioElements.current.delete(conn.peer);
+        }
         setMutedViewers(prev => {
           const next = new Set(prev);
           next.delete(conn.peer);
@@ -249,15 +251,19 @@ const ScreenSharePresenter = ({ roomId, peerConfig }: ScreenSharePresenterProps)
         });
         setViewerCount(viewerConnections.current.size);
         addViewerActivity('leave', conn.peer);
-        // Update audio mix when viewer leaves
-        updateViewerAudioMix();
       });
 
       conn.on('error', (err) => {
         console.error('Viewer data connection error:', err);
         viewerConnections.current.delete(conn.peer);
         viewerMediaCalls.current.delete(conn.peer);
-        viewerAudioStreams.current.delete(conn.peer);
+        // Clean up audio element for this viewer
+        const audioEl = viewerAudioElements.current.get(conn.peer);
+        if (audioEl) {
+          audioEl.srcObject = null;
+          audioEl.remove();
+          viewerAudioElements.current.delete(conn.peer);
+        }
         setMutedViewers(prev => {
           const next = new Set(prev);
           next.delete(conn.peer);
@@ -288,19 +294,34 @@ const ScreenSharePresenter = ({ roomId, peerConfig }: ScreenSharePresenterProps)
       call.on('stream', (remoteStream) => {
         console.log('Received audio stream from viewer:', call.peer, 'tracks:', remoteStream.getTracks().map(t => t.kind));
         
-        // Store viewer audio stream
-        viewerAudioStreams.current.set(call.peer, remoteStream);
+        // Create a dedicated audio element for this viewer
+        let audioEl = viewerAudioElements.current.get(call.peer);
+        if (!audioEl) {
+          audioEl = document.createElement('audio');
+          audioEl.autoplay = true;
+          // Start muted for autoplay policy, user must click to enable
+          audioEl.muted = !isViewerAudioEnabled;
+          viewerAudioContainerRef.current?.appendChild(audioEl);
+          viewerAudioElements.current.set(call.peer, audioEl);
+        }
         
-        // Rebuild audio mix
-        updateViewerAudioMix();
+        audioEl.srcObject = remoteStream;
+        audioEl.play().catch(err => {
+          console.log('Viewer audio autoplay blocked:', err);
+        });
         
+        setIsViewerAudioEnabled(prev => prev); // Force re-render to show audio controls
         toast.success('Viewer microphone connected');
       });
 
       call.on('close', () => {
         console.log('Viewer audio call closed:', call.peer);
-        viewerAudioStreams.current.delete(call.peer);
-        updateViewerAudioMix();
+        const audioEl = viewerAudioElements.current.get(call.peer);
+        if (audioEl) {
+          audioEl.srcObject = null;
+          audioEl.remove();
+          viewerAudioElements.current.delete(call.peer);
+        }
       });
     };
 
@@ -309,59 +330,30 @@ const ScreenSharePresenter = ({ roomId, peerConfig }: ScreenSharePresenterProps)
     return () => {
       peer.off('call', handleCall);
     };
-  }, []);
-
-  // Update viewer audio mix
-  const updateViewerAudioMix = useCallback(() => {
-    if (!viewerAudioRef.current) return;
-    
-    // If no viewer audio streams, clear the audio
-    if (viewerAudioStreams.current.size === 0) {
-      viewerAudioRef.current.srcObject = null;
-      return;
-    }
-    
-    // Create or reuse audio context
-    if (!audioContextRef.current || audioContextRef.current.state === 'closed') {
-      audioContextRef.current = new AudioContext();
-    }
-    
-    const audioContext = audioContextRef.current;
-    const destination = audioContext.createMediaStreamDestination();
-    
-    viewerAudioStreams.current.forEach((stream) => {
-      const source = audioContext.createMediaStreamSource(stream);
-      source.connect(destination);
-    });
-    
-    viewerAudioRef.current.srcObject = destination.stream;
-    viewerAudioRef.current.muted = isSpeakerMuted;
-    viewerAudioRef.current.play().catch(err => {
-      console.log('Viewer audio autoplay blocked, user interaction required:', err);
-    });
-  }, [isSpeakerMuted]);
+  }, [isViewerAudioEnabled]);
 
   // Enable viewer audio playback (user interaction required)
   const enableViewerAudio = useCallback(() => {
-    if (viewerAudioRef.current) {
-      viewerAudioRef.current.muted = false;
-      setIsViewerAudioEnabled(true);
-      setIsSpeakerMuted(false);
-      viewerAudioRef.current.play().catch(err => {
+    // Unmute all viewer audio elements
+    viewerAudioElements.current.forEach((audio) => {
+      audio.muted = false;
+      audio.play().catch(err => {
         console.error('Error playing viewer audio:', err);
       });
-      toast.success('Viewer audio enabled');
-    }
+    });
+    setIsViewerAudioEnabled(true);
+    setIsSpeakerMuted(false);
+    toast.success('Viewer audio enabled');
   }, []);
 
   // Toggle speaker mute for viewer audio
   const toggleSpeakerMute = useCallback(() => {
-    if (viewerAudioRef.current) {
-      const newMuted = !isSpeakerMuted;
-      viewerAudioRef.current.muted = newMuted;
-      setIsSpeakerMuted(newMuted);
-      toast.success(newMuted ? 'Speaker muted' : 'Speaker unmuted');
-    }
+    const newMuted = !isSpeakerMuted;
+    viewerAudioElements.current.forEach((audio) => {
+      audio.muted = newMuted;
+    });
+    setIsSpeakerMuted(newMuted);
+    toast.success(newMuted ? 'Speaker muted' : 'Speaker unmuted');
   }, [isSpeakerMuted]);
 
   // Call a viewer with the stream
@@ -508,12 +500,12 @@ const ScreenSharePresenter = ({ roomId, peerConfig }: ScreenSharePresenterProps)
 
   // Get list of connected viewer IDs for display
   const connectedViewerIds = Array.from(viewerConnections.current.keys());
-  const hasViewerAudio = viewerAudioStreams.current.size > 0;
+  const hasViewerAudio = viewerAudioElements.current.size > 0;
 
   return (
     <div className="min-h-screen bg-background p-6">
-      {/* Hidden audio element for viewer audio playback */}
-      <audio ref={viewerAudioRef} autoPlay muted className="hidden" />
+      {/* Hidden container for viewer audio elements */}
+      <div ref={viewerAudioContainerRef} className="hidden" />
       
       <div className="max-w-4xl mx-auto space-y-6">
         {/* Header */}
@@ -676,7 +668,7 @@ const ScreenSharePresenter = ({ roomId, peerConfig }: ScreenSharePresenterProps)
                 {connectedViewerIds.map((viewerId) => {
                   const shortId = viewerId.split('-').pop() || viewerId;
                   const isMuted = mutedViewers.has(viewerId);
-                  const hasAudio = viewerAudioStreams.current.has(viewerId);
+                  const hasAudio = viewerAudioElements.current.has(viewerId);
                   return (
                     <div
                       key={viewerId}
