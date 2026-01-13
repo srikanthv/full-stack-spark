@@ -1,0 +1,38 @@
+version: '3.8'
+
+services:
+  peerjs:
+    image: peerjs/peerjs-server:latest
+    container_name: peerjs-server
+    ports:
+      - "${PEERJS_PORT:-9000}:9000"
+    environment:
+      - DEBUG=1
+    command: ["--port", "9000", "--path", "/peerjs", "--allow_discovery"]
+    restart: unless-stopped
+    networks:
+      - webrtc-network
+
+  coturn:
+    image: coturn/coturn:latest
+    container_name: coturn-server
+    ports:
+      # STUN/TURN UDP & TCP
+      - "${TURN_PORT:-3478}:3478/udp"
+      - "${TURN_PORT:-3478}:3478/tcp"
+      # TURNS (TLS)
+      - "${TURNS_PORT:-5349}:5349/udp"
+      - "${TURNS_PORT:-5349}:5349/tcp"
+      # UDP relay ports range
+      - "49152-49200:49152-49200/udp"
+    volumes:
+      - ./coturn/turnserver.conf:/etc/coturn/turnserver.conf:ro
+      # Uncomment for production SSL certificates
+      # - ./certs:/etc/coturn/certs:ro
+    restart: unless-stopped
+    networks:
+      - webrtc-network
+
+networks:
+  webrtc-network:
+    driver: bridge
