@@ -1,6 +1,5 @@
 import { useParams } from 'react-router-dom';
-import ScreenSharePresenter from '@/components/ScreenSharePresenter';
-import { peerConfig } from '@/webrtc/peerConfig';
+import ScreenSharePresenterUI from '@/components/ScreenSharePresenterUI';
 
 const Presenter = () => {
   const { roomId } = useParams<{ roomId: string }>();
@@ -13,7 +12,7 @@ const Presenter = () => {
     );
   }
 
-  return <ScreenSharePresenter roomId={roomId} peerConfig={peerConfig} />;
+  return <ScreenSharePresenterUI roomId={roomId} />;
 };
 
 export default Presenter;
