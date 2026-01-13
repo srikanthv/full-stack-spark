@@ -1,9 +1,9 @@
 import { useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, Link } from 'react-router-dom';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
-import { Monitor, Users, ArrowRight, Presentation } from 'lucide-react';
+import { Monitor, Users, ArrowRight, Presentation, TestTube } from 'lucide-react';
 
 const Index = () => {
   const [roomId, setRoomId] = useState('');
@@ -127,6 +127,28 @@ const Index = () => {
               </div>
               <Button onClick={handleStartDemo} size="sm">
                 Launch
+              </Button>
+            </div>
+          </CardContent>
+        </Card>
+
+        {/* Navigation Test Card */}
+        <Card className="border-dashed">
+          <CardContent className="pt-6">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <div className="p-2 bg-muted rounded-lg">
+                  <TestTube className="w-6 h-6 text-muted-foreground" />
+                </div>
+                <div>
+                  <h3 className="font-semibold">Test Navigation Persistence</h3>
+                  <p className="text-sm text-muted-foreground">
+                    Test that screen sharing survives route changes
+                  </p>
+                </div>
+              </div>
+              <Button asChild variant="outline" size="sm">
+                <Link to="/demo/page-a">Test</Link>
               </Button>
             </div>
           </CardContent>
